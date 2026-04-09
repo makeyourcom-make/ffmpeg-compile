@@ -1,0 +1,9 @@
+# Render.com deployment configuration
+services:
+  - type: web
+    name: ffmpeg-compile
+    runtime: docker
+    plan: free
+    envVars:
+      - key: API_KEY
+        generateValue: true
