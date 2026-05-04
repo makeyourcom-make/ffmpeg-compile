@@ -7,3 +7,7 @@ services:
     envVars:
       - key: API_KEY
         generateValue: true
+      - key: WORKER_UPLOAD_URL
+        value: https://media-onedrive-proxy.yellow-dust-f7b9.workers.dev/upload
+      - key: WORKER_UPLOAD_SECRET
+        sync: false  # set manually in Render dashboard (Settings → Environment)
