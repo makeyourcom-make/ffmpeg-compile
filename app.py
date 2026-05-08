@@ -79,37 +79,60 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                 job["error"] = f"Only {len(downloaded)} videos downloaded, need at least 2"
                 return
 
-            # 2. Build ffmpeg concat list
-            file_list = os.path.join(tmpdir, "files.txt")
-            with open(file_list, "w") as f:
-                for fp in downloaded:
-                    f.write(f"file '{fp}'\n")
-
             output_path = os.path.join(tmpdir, "compilation.mp4")
 
-            # 3. Re-encode concat with normalized resolution (handles heterogeneous codecs/sizes)
-            #    Always re-encode ÔÇö stream-copy concat produces corrupt frames when source
-            #    clips have different codecs/resolutions/fps. Cap output to 570s for TikTok.
+            # 2. Normalize each clip individually (low RAM usage ÔÇö 1 file at a time)
+            #    Required because clips have heterogeneous codecs/resolutions/fps,
+            #    and stream-copy concat produces corrupt frames in that case.
+            job["step"] = "normalizing"
+            normalized = []
+            for i, fp in enumerate(downloaded):
+                out = os.path.join(tmpdir, f"normalized_{i:03d}.mp4")
+                job["progress"] = f"Normalizing {i+1}/{len(downloaded)}"
+                logger.info(f"[{job_id}] Normalizing {i+1}/{len(downloaded)}")
+                cmd_norm = [
+                    "ffmpeg", "-i", fp,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                    "-vf",
+                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                    "-r", "30",
+                    "-threads", "1",
+                    "-y", out,
+                ]
+                result = subprocess.run(cmd_norm, capture_output=True, text=True, timeout=300)
+                if result.returncode != 0:
+                    logger.error(f"[{job_id}] Normalize {i} failed: {result.stderr[-300:]}")
+                    continue
+                normalized.append(out)
+
+            if len(normalized) < 2:
+                job["status"] = "error"
+                job["error"] = f"Only {len(normalized)} videos normalized successfully"
+                return
+
+            # 3. Concat with stream-copy (no re-encoding = very low memory)
+            file_list = os.path.join(tmpdir, "files.txt")
+            with open(file_list, "w") as f:
+                for fp in normalized:
+                    f.write(f"file '{fp}'\n")
+
             job["step"] = "compiling"
-            job["progress"] = "FFmpeg concat (re-encoding)..."
-            cmd_reencode = [
+            job["progress"] = f"Concat {len(normalized)} normalized clips..."
+            cmd_concat = [
                 "ffmpeg", "-f", "concat", "-safe", "0",
                 "-i", file_list,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                "-vf",
-                "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-                "-r", "30",
+                "-c", "copy",
                 "-t", "570",
                 "-movflags", "+faststart",
                 "-y", output_path,
             ]
-            result = subprocess.run(cmd_reencode, capture_output=True, text=True, timeout=1800)
+            result = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=600)
             if result.returncode != 0:
-                logger.error(f"[{job_id}] FFmpeg failed: {result.stderr[-500:]}")
+                logger.error(f"[{job_id}] FFmpeg concat failed: {result.stderr[-500:]}")
                 job["status"] = "error"
-                job["error"] = f"FFmpeg compilation failed: {result.stderr[-300:]}"
+                job["error"] = f"FFmpeg concat failed: {result.stderr[-300:]}"
                 return
 
             if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
