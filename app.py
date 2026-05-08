@@ -3,8 +3,8 @@ FFmpeg Video Compilation Service
 Receives video URLs, concatenates them with FFmpeg, uploads to Cloudflare R2
 via the media-onedrive-proxy Worker.
 
-POST /compile          ÔåÆ returns job_id immediately (async)
-GET  /status/<job_id>  ÔåÆ progress + R2 URL when done
+POST /compile          → returns job_id immediately (async)
+GET  /status/<job_id>  → progress + R2 URL when done
 """
 
 import os
@@ -28,8 +28,95 @@ WORKER_UPLOAD_URL = os.environ.get(
 )
 WORKER_UPLOAD_SECRET = os.environ.get("WORKER_UPLOAD_SECRET", "")
 
+# Azure OneDrive (Microsoft Graph) — for chunked backup upload of compilations.
+# Avoids n8n OOM by streaming directly from disk to OneDrive in 4 MB chunks.
+AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
+AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "")
+AZURE_REFRESH_TOKEN = os.environ.get("AZURE_REFRESH_TOKEN", "")
+_token_cache = {"access_token": None, "expires_at": 0, "refresh_token": AZURE_REFRESH_TOKEN}
+
 jobs: dict = {}
 JOBS_MAX_AGE = 7200  # auto-clean jobs older than 2 hours
+
+
+def _get_onedrive_token():
+    """Returns a fresh access token using the stored refresh token. Cached in-memory."""
+    if _token_cache["access_token"] and _token_cache["expires_at"] > time.time() + 60:
+        return _token_cache["access_token"]
+    if not (AZURE_CLIENT_ID and AZURE_CLIENT_SECRET and _token_cache["refresh_token"]):
+        raise RuntimeError("Azure credentials not configured (CLIENT_ID/SECRET/REFRESH_TOKEN)")
+    r = http_requests.post(
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        data={
+            "client_id": AZURE_CLIENT_ID,
+            "client_secret": AZURE_CLIENT_SECRET,
+            "refresh_token": _token_cache["refresh_token"],
+            "grant_type": "refresh_token",
+            "scope": "Files.ReadWrite.All offline_access",
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    _token_cache["access_token"] = data["access_token"]
+    _token_cache["expires_at"] = time.time() + data.get("expires_in", 3600)
+    # Microsoft rotates refresh tokens — store the new one in-process for this run
+    if "refresh_token" in data:
+        _token_cache["refresh_token"] = data["refresh_token"]
+    return _token_cache["access_token"]
+
+
+def _upload_to_onedrive(file_path: str, parent_id: str, filename: str):
+    """Chunked upload via Graph upload session. Returns (item_id, web_url, size_bytes)."""
+    token = _get_onedrive_token()
+    create_url = (
+        f"https://graph.microsoft.com/v1.0/me/drive/items/{parent_id}:/{filename}:"
+        f"/createUploadSession"
+    )
+    r = http_requests.post(
+        create_url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"item": {"@microsoft.graph.conflictBehavior": "rename", "name": filename}},
+        timeout=30,
+    )
+    r.raise_for_status()
+    upload_url = r.json()["uploadUrl"]
+
+    # 4 MB chunks (must be a multiple of 320 KiB per Graph API spec)
+    CHUNK_SIZE = 4 * 1024 * 1024
+    file_size = os.path.getsize(file_path)
+    item = None
+    with open(file_path, "rb") as f:
+        offset = 0
+        while offset < file_size:
+            chunk = f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            chunk_end = offset + len(chunk) - 1
+            up = http_requests.put(
+                upload_url,
+                headers={
+                    "Content-Length": str(len(chunk)),
+                    "Content-Range": f"bytes {offset}-{chunk_end}/{file_size}",
+                },
+                data=chunk,
+                timeout=300,
+            )
+            if up.status_code in (200, 201):
+                item = up.json()
+                break
+            elif up.status_code == 202:
+                offset = chunk_end + 1
+            else:
+                raise RuntimeError(
+                    f"Chunked upload failed at {offset}: {up.status_code} {up.text[:300]}"
+                )
+    if not item:
+        raise RuntimeError("Upload finished without final response")
+    return item["id"], item.get("webUrl", ""), item.get("size", file_size)
 
 
 def _cleanup_old_jobs():
@@ -81,7 +168,7 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
 
             output_path = os.path.join(tmpdir, "compilation.mp4")
 
-            # 2. Normalize each clip individually (low RAM usage ÔÇö 1 file at a time)
+            # 2. Normalize each clip individually (low RAM usage — 1 file at a time)
             #    Required because clips have heterogeneous codecs/resolutions/fps,
             #    and stream-copy concat produces corrupt frames in that case.
             job["step"] = "normalizing"
@@ -168,15 +255,34 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
 
             logger.info(f"[{job_id}] Upload complete: {upload_response['url']}")
 
-            job["status"] = "done"
-            job["step"] = "done"
-            job["progress"] = "Complete"
-            job["result"] = {
+            result = {
                 "url": upload_response["url"],
                 "key": upload_response["key"],
                 "size_mb": round(output_size_mb, 1),
                 "videos_compiled": len(downloaded),
             }
+
+            # 5. Optional: chunked backup to OneDrive (skipped silently if not requested)
+            onedrive_filename = job.get("onedrive_filename")
+            onedrive_parent_id = job.get("onedrive_parent_id")
+            if onedrive_filename and onedrive_parent_id:
+                job["step"] = "uploading_onedrive"
+                job["progress"] = f"Backup {output_size_mb:.0f}MB to OneDrive..."
+                try:
+                    item_id, web_url, _sz = _upload_to_onedrive(
+                        output_path, onedrive_parent_id, onedrive_filename
+                    )
+                    result["onedrive_id"] = item_id
+                    result["onedrive_url"] = web_url
+                    logger.info(f"[{job_id}] OneDrive backup OK: {item_id}")
+                except Exception as od_err:
+                    logger.error(f"[{job_id}] OneDrive backup failed (non-fatal): {od_err}")
+                    result["onedrive_error"] = str(od_err)
+
+            job["status"] = "done"
+            job["step"] = "done"
+            job["progress"] = "Complete"
+            job["result"] = result
 
     except Exception as e:
         logger.exception(f"[{job_id}] Unexpected error in compile worker")
@@ -193,7 +299,98 @@ def health():
         "active_jobs": active,
         "total_jobs": len(jobs),
         "worker_configured": bool(WORKER_UPLOAD_SECRET),
+        "onedrive_configured": bool(
+            AZURE_CLIENT_ID and AZURE_CLIENT_SECRET and _token_cache["refresh_token"]
+        ),
     })
+
+
+@app.route("/oauth/start", methods=["GET"])
+def oauth_start():
+    """One-time OAuth flow to obtain a refresh_token for OneDrive uploads.
+    Visit this URL in a browser while signed in to your Microsoft account.
+    """
+    if not AZURE_CLIENT_ID:
+        return "AZURE_CLIENT_ID env var not set", 500
+    redirect_uri = request.url_root.rstrip("/") + "/oauth/callback"
+    auth_url = (
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        f"?client_id={AZURE_CLIENT_ID}"
+        "&response_type=code"
+        f"&redirect_uri={redirect_uri}"
+        "&response_mode=query"
+        "&scope=Files.ReadWrite.All%20offline_access%20User.Read"
+        "&prompt=consent"
+    )
+    return f'<html><body><h1>OAuth Setup</h1><p>Redirect URI registered: <code>{redirect_uri}</code></p><p><a href="{auth_url}">→ Sign in with Microsoft to grant access</a></p></body></html>'
+
+
+@app.route("/oauth/callback", methods=["GET"])
+def oauth_callback():
+    """Exchanges the auth code for a refresh_token, then displays it for env-var setup."""
+    code = request.args.get("code")
+    error = request.args.get("error")
+    if error:
+        return f"<pre>OAuth error: {error}\n{request.args.get('error_description', '')}</pre>", 400
+    if not code:
+        return "Missing code parameter", 400
+    if not (AZURE_CLIENT_ID and AZURE_CLIENT_SECRET):
+        return "AZURE_CLIENT_ID/SECRET not configured on server", 500
+    redirect_uri = request.url_root.rstrip("/") + "/oauth/callback"
+    try:
+        r = http_requests.post(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            data={
+                "client_id": AZURE_CLIENT_ID,
+                "client_secret": AZURE_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri,
+                "scope": "Files.ReadWrite.All offline_access User.Read",
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        tokens = r.json()
+    except Exception as e:
+        return f"<pre>Token exchange failed: {e}\n{getattr(e, 'response', None) and e.response.text[:500]}</pre>", 500
+    refresh_token = tokens.get("refresh_token", "")
+    # Cache in-memory for immediate testing without a redeploy
+    _token_cache["refresh_token"] = refresh_token
+    _token_cache["access_token"] = tokens.get("access_token")
+    _token_cache["expires_at"] = time.time() + tokens.get("expires_in", 3600)
+    return (
+        "<html><body><h1>✓ OAuth success</h1>"
+        "<p><b>Copy this refresh_token</b> into the Render env var <code>AZURE_REFRESH_TOKEN</code>:</p>"
+        f"<textarea rows=8 cols=120 onclick='this.select()'>{refresh_token}</textarea>"
+        "<p>The token has also been cached in memory — you can immediately test "
+        '<a href="/test-onedrive">/test-onedrive</a> (with X-API-Key header).</p>'
+        "<p>After saving to Render env vars, the service will restart and re-load the token "
+        "permanently.</p></body></html>"
+    )
+
+
+@app.route("/test-onedrive", methods=["GET"])
+@require_api_key
+def test_onedrive():
+    """Verify Azure refresh_token works by minting an access token and listing root."""
+    try:
+        token = _get_onedrive_token()
+        r = http_requests.get(
+            "https://graph.microsoft.com/v1.0/me/drive/root",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        info = r.json()
+        return jsonify({
+            "ok": True,
+            "drive_id": info.get("parentReference", {}).get("driveId"),
+            "drive_name": info.get("name"),
+            "owner": info.get("createdBy", {}).get("user", {}).get("displayName"),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/compile", methods=["POST"])
@@ -213,6 +410,8 @@ def compile_videos():
 
     video_urls = data.get("urls", [])
     r2_key = data.get("key")
+    onedrive_filename = data.get("onedrive_filename")  # optional
+    onedrive_parent_id = data.get("onedrive_parent_id")  # optional
 
     if not video_urls:
         return jsonify({"error": "No video URLs provided"}), 400
@@ -234,9 +433,11 @@ def compile_videos():
         "videos": len(video_urls),
         "result": None,
         "error": None,
+        "onedrive_filename": onedrive_filename,
+        "onedrive_parent_id": onedrive_parent_id,
     }
 
-    logger.info(f"[{job_id}] Job created ÔÇö {len(video_urls)} videos ÔåÆ {r2_key}")
+    logger.info(f"[{job_id}] Job created — {len(video_urls)} videos → {r2_key}")
 
     thread = threading.Thread(
         target=_compile_worker,
