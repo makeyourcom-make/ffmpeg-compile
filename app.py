@@ -92,13 +92,14 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                 logger.info(f"[{job_id}] Normalizing {i+1}/{len(downloaded)}")
                 cmd_norm = [
                     "ffmpeg", "-i", fp,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                    "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
                     "-vf",
-                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                    "scale=720:1280:force_original_aspect_ratio=decrease,"
+                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2",
                     "-r", "30",
                     "-threads", "1",
+                    "-x264-params", "ref=1:bframes=0:rc-lookahead=10",
                     "-y", out,
                 ]
                 result = subprocess.run(cmd_norm, capture_output=True, text=True, timeout=300)
