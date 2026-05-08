@@ -412,6 +412,35 @@ def oauth_callback():
     )
 
 
+@app.route("/list-folders", methods=["GET"])
+@require_api_key
+def list_folders():
+    """List children of an OneDrive folder. Pass ?parent=<id> or omit for root.
+    Used during multi-brand replication to discover folder IDs.
+    """
+    parent = request.args.get("parent")
+    try:
+        token = _get_onedrive_token()
+        if parent:
+            url = f"https://graph.microsoft.com/v1.0/me/drive/items/{parent}/children"
+        else:
+            url = "https://graph.microsoft.com/v1.0/me/drive/root/children"
+        r = http_requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"$select": "id,name,folder,parentReference", "$top": 200},
+            timeout=15,
+        )
+        r.raise_for_status()
+        items = r.json().get("value", [])
+        return jsonify({"parent": parent or "root", "count": len(items), "items": [
+            {"id": i["id"], "name": i["name"], "is_folder": "folder" in i}
+            for i in items
+        ]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/test-onedrive", methods=["GET"])
 @require_api_key
 def test_onedrive():
