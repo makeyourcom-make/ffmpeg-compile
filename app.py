@@ -207,12 +207,11 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                     f.write(f"file '{fp}'\n")
 
             job["step"] = "compiling"
-            job["progress"] = f"Concat {len(normalized)} normalized clips..."
+            job["progress"] = f"Concat {len(normalized)} normalized clips (full)..."
             cmd_concat = [
                 "ffmpeg", "-f", "concat", "-safe", "0",
                 "-i", file_list,
                 "-c", "copy",
-                "-t", "570",
                 "-movflags", "+faststart",
                 "-y", output_path,
             ]
@@ -230,6 +229,24 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
 
             output_size_mb = os.path.getsize(output_path) / (1024 * 1024)
             logger.info(f"[{job_id}] Compilation successful: {output_size_mb:.1f}MB")
+
+            # 3b. Optional TikTok-capped variant (stream-copy trim — runs in seconds)
+            tiktok_path = None
+            tiktok_key = job.get("tiktok_key")
+            if tiktok_key:
+                tiktok_path = os.path.join(tmpdir, "compilation_tiktok.mp4")
+                job["progress"] = "Trimming TikTok variant to 570s..."
+                cmd_trim = [
+                    "ffmpeg", "-i", output_path,
+                    "-c", "copy",
+                    "-t", "570",
+                    "-movflags", "+faststart",
+                    "-y", tiktok_path,
+                ]
+                trim = subprocess.run(cmd_trim, capture_output=True, text=True, timeout=120)
+                if trim.returncode != 0 or not os.path.exists(tiktok_path):
+                    logger.error(f"[{job_id}] TikTok trim failed: {trim.stderr[-300:]}")
+                    tiktok_path = None  # non-fatal — TikTok URL just won't be returned
 
             # 4. Upload to R2 via Worker
             job["step"] = "uploading"
@@ -261,6 +278,31 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                 "size_mb": round(output_size_mb, 1),
                 "videos_compiled": len(downloaded),
             }
+
+            # 4b. Upload TikTok-capped variant to R2 (separate key)
+            if tiktok_path:
+                job["progress"] = f"Uploading TikTok variant to R2..."
+                try:
+                    with open(tiktok_path, "rb") as f:
+                        rt = http_requests.post(
+                            f"{WORKER_UPLOAD_URL}?key={tiktok_key}",
+                            headers={
+                                "Authorization": f"Bearer {WORKER_UPLOAD_SECRET}",
+                                "Content-Type": "video/mp4",
+                            },
+                            data=f,
+                            timeout=900,
+                        )
+                    rt.raise_for_status()
+                    tiktok_response = rt.json()
+                    tiktok_size_mb = os.path.getsize(tiktok_path) / (1024 * 1024)
+                    result["tiktok_url"] = tiktok_response["url"]
+                    result["tiktok_key"] = tiktok_response["key"]
+                    result["tiktok_size_mb"] = round(tiktok_size_mb, 1)
+                    logger.info(f"[{job_id}] TikTok variant uploaded: {tiktok_response['url']} ({tiktok_size_mb:.1f}MB)")
+                except Exception as e:
+                    logger.error(f"[{job_id}] TikTok variant upload failed (non-fatal): {e}")
+                    result["tiktok_error"] = str(e)
 
             # 5. Optional: chunked backup to OneDrive (skipped silently if not requested)
             onedrive_filename = job.get("onedrive_filename")
@@ -410,6 +452,7 @@ def compile_videos():
 
     video_urls = data.get("urls", [])
     r2_key = data.get("key")
+    tiktok_key = data.get("tiktok_key")  # optional — produces a 570s trimmed variant
     onedrive_filename = data.get("onedrive_filename")  # optional
     onedrive_parent_id = data.get("onedrive_parent_id")  # optional
 
@@ -433,6 +476,7 @@ def compile_videos():
         "videos": len(video_urls),
         "result": None,
         "error": None,
+        "tiktok_key": tiktok_key,
         "onedrive_filename": onedrive_filename,
         "onedrive_parent_id": onedrive_parent_id,
     }
