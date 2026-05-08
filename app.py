@@ -95,8 +95,8 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                     "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
                     "-vf",
-                    "scale=720:1280:force_original_aspect_ratio=decrease,"
-                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2",
+                    "scale=1280:720:force_original_aspect_ratio=decrease,"
+                    "pad=1280:720:(ow-iw)/2:(oh-ih)/2",
                     "-r", "30",
                     "-threads", "1",
                     "-x264-params", "ref=1:bframes=0:rc-lookahead=10",
