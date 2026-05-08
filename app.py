@@ -3,8 +3,8 @@ FFmpeg Video Compilation Service
 Receives video URLs, concatenates them with FFmpeg, uploads to Cloudflare R2
 via the media-onedrive-proxy Worker.
 
-POST /compile          → returns job_id immediately (async)
-GET  /status/<job_id>  → progress + R2 URL when done
+POST /compile          ÔåÆ returns job_id immediately (async)
+GET  /status/<job_id>  ÔåÆ progress + R2 URL when done
 """
 
 import os
@@ -87,40 +87,30 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
 
             output_path = os.path.join(tmpdir, "compilation.mp4")
 
-            # 3. Try fast stream-copy concat
+            # 3. Re-encode concat with normalized resolution (handles heterogeneous codecs/sizes)
+            #    Always re-encode ÔÇö stream-copy concat produces corrupt frames when source
+            #    clips have different codecs/resolutions/fps. Cap output to 570s for TikTok.
             job["step"] = "compiling"
-            job["progress"] = "FFmpeg concat (stream copy)..."
-            cmd_copy = [
+            job["progress"] = "FFmpeg concat (re-encoding)..."
+            cmd_reencode = [
                 "ffmpeg", "-f", "concat", "-safe", "0",
                 "-i", file_list,
-                "-c", "copy",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-vf",
+                "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "-r", "30",
+                "-t", "570",
                 "-movflags", "+faststart",
                 "-y", output_path,
             ]
-            result = subprocess.run(cmd_copy, capture_output=True, text=True, timeout=600)
-
+            result = subprocess.run(cmd_reencode, capture_output=True, text=True, timeout=1800)
             if result.returncode != 0:
-                # Fallback: re-encode with normalised resolution
-                job["progress"] = "FFmpeg re-encoding (fallback)..."
-                logger.info(f"[{job_id}] Fast concat failed, re-encoding")
-                cmd_reencode = [
-                    "ffmpeg", "-f", "concat", "-safe", "0",
-                    "-i", file_list,
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "128k",
-                    "-vf",
-                    "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-                    "-r", "30",
-                    "-movflags", "+faststart",
-                    "-y", output_path,
-                ]
-                result = subprocess.run(cmd_reencode, capture_output=True, text=True, timeout=1800)
-                if result.returncode != 0:
-                    logger.error(f"[{job_id}] FFmpeg failed: {result.stderr[-500:]}")
-                    job["status"] = "error"
-                    job["error"] = f"FFmpeg compilation failed: {result.stderr[-300:]}"
-                    return
+                logger.error(f"[{job_id}] FFmpeg failed: {result.stderr[-500:]}")
+                job["status"] = "error"
+                job["error"] = f"FFmpeg compilation failed: {result.stderr[-300:]}"
+                return
 
             if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
                 job["status"] = "error"
@@ -222,7 +212,7 @@ def compile_videos():
         "error": None,
     }
 
-    logger.info(f"[{job_id}] Job created — {len(video_urls)} videos → {r2_key}")
+    logger.info(f"[{job_id}] Job created ÔÇö {len(video_urls)} videos ÔåÆ {r2_key}")
 
     thread = threading.Thread(
         target=_compile_worker,
