@@ -412,6 +412,44 @@ def oauth_callback():
     )
 
 
+@app.route("/move-onedrive", methods=["POST"])
+@require_api_key
+def move_onedrive():
+    """Move a OneDrive item to a new parent folder via Microsoft Graph PATCH.
+
+    The n8n Microsoft OneDrive node's "move" operation silently no-ops on personal
+    accounts, so daily workflows call this endpoint instead.
+
+    Body: {"file_id": "AB3777D49B68228!s...", "parent_id": "AB3777D49B68228!s..."}
+    """
+    data = request.json or {}
+    file_id = data.get("file_id")
+    parent_id = data.get("parent_id")
+    if not (file_id and parent_id):
+        return jsonify({"ok": False, "error": "file_id and parent_id required"}), 400
+    try:
+        token = _get_onedrive_token()
+        r = http_requests.patch(
+            f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"parentReference": {"id": parent_id}},
+            timeout=30,
+        )
+        r.raise_for_status()
+        info = r.json()
+        return jsonify({
+            "ok": True,
+            "id": info.get("id"),
+            "name": info.get("name"),
+            "new_parent": info.get("parentReference", {}).get("id"),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/list-folders", methods=["GET"])
 @require_api_key
 def list_folders():
