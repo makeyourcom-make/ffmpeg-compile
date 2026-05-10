@@ -177,8 +177,25 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                 out = os.path.join(tmpdir, f"normalized_{i:03d}.mp4")
                 job["progress"] = f"Normalizing {i+1}/{len(downloaded)}"
                 logger.info(f"[{job_id}] Normalizing {i+1}/{len(downloaded)}")
-                cmd_norm = [
-                    "ffmpeg", "-i", fp,
+
+                # Probe for audio stream — if missing, we need to add a silent track
+                # so the concat demuxer can stream-copy without dropping audio.
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-select_streams", "a:0",
+                     "-show_entries", "stream=codec_type", "-of", "csv=p=0", fp],
+                    capture_output=True, text=True, timeout=10,
+                )
+                has_audio = bool(probe.stdout.strip())
+
+                base_cmd = ["ffmpeg", "-i", fp]
+                map_args = []
+                if not has_audio:
+                    # Add a silent stereo audio track matching the video duration
+                    base_cmd += ["-f", "lavfi", "-i",
+                                 "anullsrc=channel_layout=stereo:sample_rate=44100"]
+                    map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+
+                cmd_norm = base_cmd + map_args + [
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                     "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
                     "-vf",
@@ -191,7 +208,7 @@ def _compile_worker(job_id: str, video_urls: list, r2_key: str):
                 ]
                 result = subprocess.run(cmd_norm, capture_output=True, text=True, timeout=300)
                 if result.returncode != 0:
-                    logger.error(f"[{job_id}] Normalize {i} failed: {result.stderr[-300:]}")
+                    logger.error(f"[{job_id}] Normalize {i} failed (audio={has_audio}): {result.stderr[-300:]}")
                     continue
                 normalized.append(out)
 
