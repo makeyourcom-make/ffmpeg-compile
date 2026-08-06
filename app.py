@@ -446,15 +446,36 @@ def move_onedrive():
         return jsonify({"ok": False, "error": "file_id and parent_id required"}), 400
     try:
         token = _get_onedrive_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
         r = http_requests.patch(
             f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
+            headers=headers,
+            json={
+                "parentReference": {"id": parent_id},
+                "@microsoft.graph.conflictBehavior": "replace",
             },
-            json={"parentReference": {"id": parent_id}},
             timeout=30,
         )
+        if r.status_code == 409:
+            # A same-named file already sits in the destination (same clip from a
+            # previous week). Without this fallback the source never leaves the
+            # queue and the dailies repost the same clip forever. The destination
+            # already holds an identical copy, so dropping the source is safe.
+            d = http_requests.delete(
+                f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            d.raise_for_status()
+            return jsonify({
+                "ok": True,
+                "id": file_id,
+                "mode": "deleted_source_conflict",
+                "new_parent": parent_id,
+            })
         r.raise_for_status()
         info = r.json()
         return jsonify({
