@@ -627,6 +627,35 @@ def job_status(job_id):
     return jsonify(response)
 
 
+
+@app.route("/transform", methods=["POST"])
+@require_api_key
+def transform_clip():
+    """
+    POST /transform — transforme un clip repost en contenu média (hook + voix off + sous-titres + watermark).
+    JSON: { video_url, niche, handle, gemini_key, key, lang?, voice?, context? }
+    Synchrone (~30-90 s). Retourne { url, key, hook, voiceover, caption, title, duration, size_mb }.
+    """
+    import transform as tf
+    data = request.json or {}
+    for k in ("video_url", "niche", "handle", "gemini_key", "key"):
+        if not data.get(k):
+            return jsonify({"error": f"Missing '{k}'"}), 400
+    if not WORKER_UPLOAD_SECRET:
+        return jsonify({"error": "Server misconfigured: WORKER_UPLOAD_SECRET not set"}), 500
+    try:
+        result = tf.transform(
+            data["video_url"], data["niche"], data["handle"], data["gemini_key"], data["key"],
+            lang=data.get("lang", "en"), voice=data.get("voice"), context=data.get("context", ""),
+            upload_url=WORKER_UPLOAD_URL, upload_secret=WORKER_UPLOAD_SECRET,
+        )
+        logger.info(f"[transform] {data['key']} ok — {result.get('hook')}")
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("[transform] failed")
+        return jsonify({"error": str(e)[:500]}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
