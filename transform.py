@@ -241,18 +241,16 @@ def transform(video_url, niche, handle, gemini_key, r2_key, lang="en", voice=Non
                       f"x=(w-text_w)/2:y=1740")
         vf_str = ",".join(vf)
 
-        # --- audio : original atténué pendant la voix, voix off à vo_start
-        delay_ms = int(vo_start * 1000)
+        # --- audio : on garde UNIQUEMENT le son d'origine du clip (sa musique), pas de voix off
         if has_audio:
-            duck_end = vo_start + vo_dur + 0.3
-            af = (f"[0:a]volume='if(between(t,{vo_start - 0.3:.2f},{duck_end:.2f}),0.25,1)':eval=frame[orig];"
-                  f"[1:a]adelay={delay_ms}|{delay_ms},volume=1.4[vo];"
-                  f"[orig][vo]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=false[a]")
+            af = "[0:a]volume=1[a]"
+            extra_in = []
         else:
-            af = f"[1:a]adelay={delay_ms}|{delay_ms},volume=1.4,apad[a]"
+            af = "[1:a]anull[a]"
+            extra_in = ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
 
         out = os.path.join(tmp, "out.mp4")
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", src, "-i", vo,
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", src] + extra_in + [
                "-filter_complex", af, "-map", "0:v", "-map", "[a]", "-vf", vf_str,
                "-t", f"{dur:.2f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
                "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", "-threads", "2", out]
