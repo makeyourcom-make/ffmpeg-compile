@@ -44,6 +44,7 @@ NICHE_DESC = {
     "car": "car culture (supercars, muscle cars, JDM, engines)",
     "humour": "French comedy and funny clips",
     "geek": "gaming, anime and tech",
+    "gta": "GTA 6 / Grand Theft Auto VI hype and news (the game is about to launch). Comment on what is visibly shown in the clip and the general excitement around the launch. Do NOT invent release dates, prices, map details or specific features you cannot see",
 }
 
 
