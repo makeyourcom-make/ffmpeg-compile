@@ -236,9 +236,6 @@ def transform(video_url, niche, handle, gemini_key, r2_key, lang="en", voice=Non
                     for i, line in enumerate(sub_lines):
                         vf.append(f"drawtext={font}text='{_ff_escape(line)}':fontsize={sfs}:fontcolor=white:borderw=5:bordercolor=black:"
                                   f"x=(w-text_w)/2:y={y0 + i * slh}:enable='between(t,{st:.2f},{en:.2f})'")
-            # watermark
-            vf.append(f"drawtext={font}text='{_ff_escape(handle)}':fontsize=34:fontcolor=0xFFC832:borderw=3:bordercolor=black:"
-                      f"x=(w-text_w)/2:y=1740")
         vf_str = ",".join(vf)
 
         # --- audio : on garde UNIQUEMENT le son d'origine du clip (sa musique), pas de voix off
