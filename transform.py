@@ -38,7 +38,8 @@ Write, in {lang_name}:
 2. "voiceover": 1-2 spoken sentences (max 28 words) that add real value: a fact, an identification, a story or a strong opinion — never describe the obvious. Must be true or clearly framed as a guess ("looks like"). No hashtags.
 3. "caption": a unique caption for the post: first line = the hook idea rephrased, then ONE engaging question, then 5 relevant hashtags. Max 220 characters.
 4. "title": 3-5 words title case.
-Return STRICT JSON with exactly these 4 keys."""
+5. "overlay": true or false. Set true ONLY if the source video already has large text/captions burned into the CENTER of the frames (meme-style). Set false for clean gameplay or footage with no central text.
+Return STRICT JSON with these keys."""
 
 NICHE_DESC = {
     "car": "car culture (supercars, muscle cars, JDM, engines)",
@@ -91,6 +92,7 @@ def _gemini(frames, niche, handle, context, lang, key):
     data["hook"] = re.sub(r"[\"'#*]", "", data["hook"]).strip().upper()[:40]
     data["voiceover"] = data["voiceover"].strip()
     data["caption"] = data["caption"].strip()[:300]
+    data["overlay"] = bool(data.get("overlay"))
     return data
 
 
@@ -217,8 +219,8 @@ def transform(video_url, niche, handle, gemini_key, r2_key, lang="en", voice=Non
             for i, line in enumerate(hook_lines):
                 vf.append(f"drawtext={font}text='{_ff_escape(line)}':fontsize={hfs}:fontcolor=white:borderw=6:bordercolor=black:"
                           f"x=(w-text_w)/2:y={300 + i * hlh}:enable='between(t,0.3,4.8)'")
-            # sous-titres de la voix off (par phrase), bas, 2 lignes
-            for s in sents:
+            # sous-titres (bas) — supprimes si la source a deja du texte incruste au centre
+            for s in (sents if not meta.get("overlay") else []):
                 # blocs de ~7 mots (2 lignes max), durée au prorata des caractères
                 words = s["text"].split()
                 chunks = [" ".join(words[i:i + 7]) for i in range(0, len(words), 7)]
