@@ -29,7 +29,7 @@ FONT_BOLD = next((p for p in [
 ] if os.path.exists(p)), "")
 GEMINI_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
 
-VOICES = {"en": "en-US-ChristopherNeural", "fr": "fr-FR-HenriNeural"}
+VOICES = {"en": "en-US-BrianMultilingualNeural", "fr": "fr-FR-RemyMultilingualNeural"}
 
 PROMPT = """You are the editor of a {niche_desc} short-video media account ({handle}) on TikTok/Instagram.
 You see 3 frames of a short clip (original caption: "{context}").
@@ -98,7 +98,7 @@ def _tts_edge(text, voice, path):
     import edge_tts
 
     async def go():
-        comm = edge_tts.Communicate(text, voice, rate="+6%", boundary="SentenceBoundary")
+        comm = edge_tts.Communicate(text, voice, rate="+0%", boundary="SentenceBoundary")
         sents = []
         with open(path, "wb") as f:
             async for chunk in comm.stream():
@@ -160,6 +160,31 @@ def _wrap(text, width):
     return lines
 
 
+def _fit(text, max_px, start_fs, max_lines, min_fs=22):
+    """Retourne (lignes, fontsize) telles que chaque ligne tient dans max_px et max_lines, en reduisant la taille si besoin."""
+    from PIL import ImageFont
+    text = " ".join(text.split())
+    fs = start_fs
+    while fs >= min_fs:
+        try:
+            f = ImageFont.truetype(FONT_BOLD, fs)
+        except Exception:
+            return _wrap(text, max(8, int(max_px / (start_fs * 0.6))))[:max_lines], fs
+        lines, cur = [], ""
+        for w in text.split():
+            trial = (cur + " " + w).strip()
+            if not cur or f.getlength(trial) <= max_px:
+                cur = trial
+            else:
+                lines.append(cur); cur = w
+        if cur:
+            lines.append(cur)
+        if len(lines) <= max_lines and all(f.getlength(l) <= max_px for l in lines):
+            return lines, fs
+        fs -= 4
+    return lines[:max_lines], max(fs, min_fs)
+
+
 def transform(video_url, niche, handle, gemini_key, r2_key, lang="en", voice=None, context="",
               upload_url=None, upload_secret=None, skip_upload=False):
     voice = voice or VOICES.get(lang, VOICES["en"])
@@ -186,11 +211,12 @@ def transform(video_url, niche, handle, gemini_key, r2_key, lang="en", voice=Non
         vf = ["scale=1080:1920:force_original_aspect_ratio=increase", "crop=1080:1920", "fps=30", "setsar=1"]
         if FONT_BOLD:
             font = f"fontfile='{FONT_BOLD.replace(':', chr(92) + ':')}':"
-            # hook : 2 lignes max, bandeau haut, visible 4,5 s
-            hook_lines = _wrap(meta["hook"], 16)[:2]
+            # hook : bandeau haut, taille auto pour tenir dans l'ecran (marge 60px/cote)
+            hook_lines, hfs = _fit(meta["hook"], 960, 82, 3)
+            hlh = hfs + 18
             for i, line in enumerate(hook_lines):
-                vf.append(f"drawtext={font}text='{_ff_escape(line)}':fontsize=84:fontcolor=white:borderw=6:bordercolor=black:"
-                          f"x=(w-text_w)/2:y={300 + i * 100}:enable='between(t,0.3,4.8)'")
+                vf.append(f"drawtext={font}text='{_ff_escape(line)}':fontsize={hfs}:fontcolor=white:borderw=6:bordercolor=black:"
+                          f"x=(w-text_w)/2:y={300 + i * hlh}:enable='between(t,0.3,4.8)'")
             # sous-titres de la voix off (par phrase), bas, 2 lignes
             for s in sents:
                 # blocs de ~7 mots (2 lignes max), durée au prorata des caractères
@@ -202,9 +228,12 @@ def transform(video_url, niche, handle, gemini_key, r2_key, lang="en", voice=Non
                     d = s["d"] * len(c) / total
                     st, en = t, t + d
                     t += d
-                    for i, line in enumerate(_wrap(c, 30)[:2]):
-                        vf.append(f"drawtext={font}text='{_ff_escape(line)}':fontsize=52:fontcolor=white:borderw=5:bordercolor=black:"
-                                  f"x=(w-text_w)/2:y={1480 + i * 68}:enable='between(t,{st:.2f},{en:.2f})'")
+                    sub_lines, sfs = _fit(c, 1000, 50, 2)
+                    slh = sfs + 14
+                    y0 = 1560 - (len(sub_lines) - 1) * slh
+                    for i, line in enumerate(sub_lines):
+                        vf.append(f"drawtext={font}text='{_ff_escape(line)}':fontsize={sfs}:fontcolor=white:borderw=5:bordercolor=black:"
+                                  f"x=(w-text_w)/2:y={y0 + i * slh}:enable='between(t,{st:.2f},{en:.2f})'")
             # watermark
             vf.append(f"drawtext={font}text='{_ff_escape(handle)}':fontsize=34:fontcolor=0xFFC832:borderw=3:bordercolor=black:"
                       f"x=(w-text_w)/2:y=1740")
